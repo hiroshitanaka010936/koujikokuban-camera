@@ -1,35 +1,102 @@
 // デジタル工事黒板：既定値・描画・文字操作
+// 寸法はすべて見本画像（写真 1800×1350、黒板 600×450）から実測した値を
+// 「黒板の幅 = 600」を基準とした割合で持っている。
 
 export const FONT = '"Hiragino Sans","Hiragino Kaku Gothic ProN","Noto Sans JP","Noto Sans CJK JP",system-ui,sans-serif';
+export const BOARD_VERSION = 2;
+export const BOARD_ASPECT = 450 / 600; // 黒板は 4:3
+export const MAX_ROWS = 6;
+
+const U = 1 / 600; // 見本の 1px（黒板幅に対する割合）
+const G = {
+  inset: 8.5 * U,    // 黒板の端から白枠までの余白
+  line: 3 * U,       // 罫線の太さ（見本は2px＋にじみ）
+  row: 61 * U,       // 1行の高さ
+  labelW: 134 * U,   // 項目名の列の右端
+  fs: 32 * U,        // 項目名・内容の文字サイズ
+  valX: 151 * U,     // 内容の書き出し位置
+  footFs: 23 * U,    // 下段（会社名・日付）の文字サイズ
+  footX: 25 * U,     // 会社名の書き出し位置
+  footR: 576 * U,    // 日付の右端
+  footY: 415.5 * U,  // 下段の文字の中心高さ
+  freeFs: 26 * U,    // 自由記入欄の文字サイズ
+};
+const COLOR = { bg: '#0e5a34', line: '#f2fffd', text: '#ffffff' };
+const WEIGHT = '600';
 
 let seq = 0;
 export function newFieldId() {
   return 'f' + Date.now().toString(36) + (seq++).toString(36);
 }
 
+// 項目の種類
+//  text     : 罫線つきの行（項目名｜内容）
+//  multiline: 下の広い欄に書く自由記入
+//  company  : 左下の会社名
+//  date     : 右下の撮影日（自動）
+export const FIELD_TYPES = [
+  ['text', '行（項目名＋内容）'],
+  ['multiline', '下の欄に自由記入'],
+  ['company', '左下（会社名など）'],
+  ['date', '右下（撮影日・自動）'],
+];
+
 export function defaultBoard() {
   return {
+    v: BOARD_VERSION,
     fields: [
       { id: 'kouji', label: '工事名', value: '', type: 'text', show: true },
-      { id: 'koushu', label: '工種', value: '', type: 'text', show: true },
-      { id: 'shubetsu', label: '種別', value: '', type: 'text', show: true },
-      { id: 'saibetsu', label: '細別', value: '', type: 'text', show: true },
-      { id: 'sokuten', label: '測点', value: 'No.1', type: 'text', show: true },
-      { id: 'date', label: '撮影日', value: '', type: 'date', show: true },
-      { id: 'sekou', label: '施工者', value: '', type: 'text', show: true },
+      { id: 'basho', label: '工事場所', value: '', type: 'text', show: true },
+      { id: 'youso', label: '要素', value: '', type: 'text', show: true },
       { id: 'bikou', label: '備考', value: '', type: 'multiline', show: true },
+      { id: 'company', label: '会社名', value: '', type: 'company', show: true },
+      { id: 'date', label: '撮影日', value: '', type: 'date', show: true },
     ],
-    style: { color: 'green', opacity: 1 },
-    // 写真に対する位置（割合）。縦向き写真 p / 横向き写真 l で別々に記憶
-    pos: { p: { x: 0.03, y: 0.66, w: 0.5 }, l: { x: 0.02, y: 0.55, w: 0.36 } },
+    // anchor: bl=左下(見本どおり) br=右下 tl=左上 tr=右上 free=自由（x,y は写真に対する割合）
+    pos: { anchor: 'bl', x: 0, y: 0 },
   };
 }
 
-const THEMES = {
-  green: { bg: '#1d4d33', frame: '#8a6a3d', text: '#ffffff', line: 'rgba(255,255,255,0.8)', label: '#e8f3ea' },
-  black: { bg: '#161616', frame: '#5a5a5a', text: '#ffffff', line: 'rgba(255,255,255,0.75)', label: '#dddddd' },
-  white: { bg: '#fbfbf7', frame: '#2b2b2b', text: '#111111', line: '#333333', label: '#222222' },
-};
+// 旧形式の黒板を新形式へ（入力済みの文字はできるだけ引き継ぐ）
+export function migrateBoard(b) {
+  if (b && b.v === BOARD_VERSION) return b;
+  const nb = defaultBoard();
+  if (b && Array.isArray(b.fields)) {
+    const val = (id) => b.fields.find((f) => f.id === id)?.value || '';
+    nb.fields.find((f) => f.id === 'kouji').value = val('kouji');
+    nb.fields.find((f) => f.id === 'company').value = val('sekou');
+    nb.fields.find((f) => f.id === 'bikou').value = val('bikou');
+  }
+  return nb;
+}
+
+// 写真の大きさから黒板の幅を求める（黒板の高さ = 写真の短辺の 1/3）
+export function boardWidthFor(photoW, photoH) {
+  return Math.min(photoW, photoH) / 3 / BOARD_ASPECT;
+}
+
+// 写真の中での黒板の左上座標
+export function boardRect(board, photoW, photoH) {
+  const w = boardWidthFor(photoW, photoH);
+  const h = w * BOARD_ASPECT;
+  const p = board.pos || { anchor: 'bl' };
+  let x, y;
+  switch (p.anchor) {
+    case 'br': x = photoW - w; y = photoH - h; break;
+    case 'tl': x = 0; y = 0; break;
+    case 'tr': x = photoW - w; y = 0; break;
+    case 'free':
+      x = Math.min(Math.max(0, (p.x || 0) * photoW), photoW - w);
+      y = Math.min(Math.max(0, (p.y || 0) * photoH), photoH - h);
+      break;
+    default: x = 0; y = photoH - h; // 左下
+  }
+  return { x, y, w, h };
+}
+
+export function measureBoard(board, w) {
+  return w * BOARD_ASPECT;
+}
 
 export function formatDate(d, mode) {
   const y = d.getFullYear(), m = d.getMonth() + 1, day = d.getDate();
@@ -40,34 +107,15 @@ export function formatDate(d, mode) {
   return `${y}/${String(m).padStart(2, '0')}/${String(day).padStart(2, '0')}`;
 }
 
-function visibleRows(board) {
-  return board.fields.filter((f) => f.show !== false);
-}
+const shown = (board) => board.fields.filter((f) => f.show !== false);
+export function rowFields(board) { return shown(board).filter((f) => f.type === 'text').slice(0, MAX_ROWS); }
 
-function rowLines(f) {
-  if (f.type !== 'multiline') return 1;
-  const n = (f.value || '').split('\n').length;
-  return Math.min(4, Math.max(1, n));
-}
-
-// 黒板の高さ（幅 w のとき）
-export function measureBoard(board, w) {
-  const rh = w * 0.095;
-  const frame = w * 0.018;
-  let h = frame * 2;
-  for (const f of visibleRows(board)) {
-    const lines = rowLines(f);
-    h += lines === 1 ? rh : rh * 0.2 + lines * rh * 0.72;
-  }
-  return Math.max(h, frame * 2 + rh);
-}
-
-function fitText(ctx, text, maxW, size, weight) {
+function fitText(ctx, text, maxW, size) {
   let s = size;
-  ctx.font = `${weight} ${s}px ${FONT}`;
-  while (ctx.measureText(text).width > maxW && s > size * 0.5) {
-    s *= 0.92;
-    ctx.font = `${weight} ${s}px ${FONT}`;
+  ctx.font = `${WEIGHT} ${s}px ${FONT}`;
+  while (ctx.measureText(text).width > maxW && s > size * 0.45) {
+    s *= 0.95;
+    ctx.font = `${WEIGHT} ${s}px ${FONT}`;
   }
   if (ctx.measureText(text).width <= maxW) return text;
   let t = text;
@@ -75,77 +123,88 @@ function fitText(ctx, text, maxW, size, weight) {
   return t + '…';
 }
 
-// ctx 上の (x,y) に幅 w で黒板を描く。when = 撮影日時(Date)、dateMode = 'ad' | 'reiwa'
+// ctx 上の (x,y) に幅 w で黒板を描く。when = 撮影日時、dateMode = 'ad' | 'reiwa'
 export function renderBoard(ctx, board, x, y, w, when, dateMode) {
-  const th = THEMES[board.style?.color] || THEMES.green;
-  const h = measureBoard(board, w);
-  const frame = w * 0.018;
-  const rh = w * 0.095;
-  const lw = w * 0.25;
-  const fs = rh * 0.5;
+  const h = w * BOARD_ASPECT;
+  const k = (v) => v * w;
+  const rows = rowFields(board);
+  const free = shown(board).find((f) => f.type === 'multiline');
+  const company = shown(board).find((f) => f.type === 'company');
+  const dateF = shown(board).find((f) => f.type === 'date');
 
   ctx.save();
   ctx.textBaseline = 'middle';
-  // 外枠
-  ctx.globalAlpha = board.style?.opacity ?? 1;
-  ctx.fillStyle = th.frame;
+  // 地
+  ctx.fillStyle = COLOR.bg;
   ctx.fillRect(x, y, w, h);
-  ctx.fillStyle = th.bg;
-  ctx.fillRect(x + frame, y + frame, w - frame * 2, h - frame * 2);
-  ctx.globalAlpha = 1;
+  // 白枠
+  const lw = Math.max(1, k(G.line));
+  const ins = k(G.inset);
+  ctx.strokeStyle = COLOR.line;
+  ctx.lineWidth = lw;
+  ctx.strokeRect(x + ins + lw / 2, y + ins + lw / 2, w - 2 * ins - lw, h - 2 * ins - lw);
 
-  const ix = x + frame, iw = w - frame * 2;
-  let cy = y + frame;
-  const rows = visibleRows(board);
-  ctx.strokeStyle = th.line;
-  ctx.lineWidth = Math.max(1, w * 0.0035);
-
-  rows.forEach((f, i) => {
-    const lines = rowLines(f);
-    const hRow = lines === 1 ? rh : rh * 0.2 + lines * rh * 0.72;
-    // 罫線
-    if (i > 0) {
-      ctx.beginPath();
-      ctx.moveTo(ix, cy);
-      ctx.lineTo(ix + iw, cy);
-      ctx.stroke();
-    }
-    ctx.beginPath();
-    ctx.moveTo(ix + lw, cy);
-    ctx.lineTo(ix + lw, cy + hRow);
-    ctx.stroke();
-
-    // 項目名
-    ctx.fillStyle = th.label;
-    ctx.textAlign = 'center';
-    const lab = fitText(ctx, f.label || '', lw - fs * 0.6, fs * 0.92, '600');
-    ctx.fillText(lab, ix + lw / 2, cy + (lines === 1 ? hRow / 2 : rh * 0.46));
-
-    // 値
-    ctx.fillStyle = th.text;
-    ctx.textAlign = 'left';
-    const vx = ix + lw + fs * 0.4;
-    const vw = iw - lw - fs * 0.8;
-    if (f.type === 'date') {
-      const t = fitText(ctx, formatDate(when || new Date(), dateMode), vw, fs, '600');
-      ctx.fillText(t, vx, cy + hRow / 2);
-    } else if (lines === 1) {
-      const t = fitText(ctx, (f.value || '').replace(/\n/g, ' '), vw, fs, '600');
-      ctx.fillText(t, vx, cy + hRow / 2);
-    } else {
-      const ls = (f.value || '').split('\n').slice(0, 4);
-      ls.forEach((ln, k) => {
-        const t = fitText(ctx, ln, vw, fs * 0.9, '500');
-        ctx.fillText(t, vx, cy + rh * 0.1 + rh * 0.72 * (k + 0.5));
-      });
-    }
-    cy += hRow;
+  // 行の罫線
+  const top = y + ins + lw / 2;
+  const rowH = k(G.row);
+  ctx.beginPath();
+  rows.forEach((_, i) => {
+    const ly = top + rowH * (i + 1);
+    ctx.moveTo(x + ins, ly);
+    ctx.lineTo(x + w - ins, ly);
   });
+  if (rows.length) {
+    const lx = x + k(G.labelW) + lw / 2;
+    ctx.moveTo(lx, top);
+    ctx.lineTo(lx, top + rowH * rows.length);
+  }
+  ctx.stroke();
+
+  // 行の文字
+  ctx.fillStyle = COLOR.text;
+  const labelCx = x + (ins + k(G.labelW)) / 2 + lw / 2;
+  const labelMax = k(G.labelW) - ins - k(24 * U);
+  const valX = x + k(G.valX);
+  const valMax = x + w - ins - k(12 * U) - valX;
+  rows.forEach((f, i) => {
+    const cy = top + rowH * (i + 0.5);
+    ctx.textAlign = 'center';
+    ctx.fillText(fitText(ctx, f.label || '', labelMax, k(G.fs)), labelCx, cy);
+    ctx.textAlign = 'left';
+    ctx.fillText(fitText(ctx, (f.value || '').replace(/\n/g, ' '), valMax, k(G.fs)), valX, cy);
+  });
+
+  // 下段：日付（右）と会社名（左）
+  const fy = y + k(G.footY);
+  let dateLeft = x + w - ins;
+  if (dateF) {
+    const ds = formatDate(when || new Date(), dateMode);
+    ctx.textAlign = 'right';
+    const t = fitText(ctx, ds, k(260 * U), k(G.footFs));
+    ctx.fillText(t, x + k(G.footR), fy);
+    dateLeft = x + k(G.footR) - ctx.measureText(t).width - k(16 * U);
+  }
+  if (company && company.value) {
+    ctx.textAlign = 'left';
+    ctx.fillText(fitText(ctx, company.value.replace(/\n/g, ' '), dateLeft - (x + k(G.footX)), k(G.footFs)), x + k(G.footX), fy);
+  }
+
+  // 自由記入欄（行の下〜下段の上）
+  if (free && free.value) {
+    const areaTop = top + rowH * rows.length + k(14 * U);
+    const areaBottom = fy - k(G.footFs) * 0.9;
+    const lh = k(G.freeFs) * 1.35;
+    const maxLines = Math.max(0, Math.floor((areaBottom - areaTop) / lh));
+    ctx.textAlign = 'left';
+    free.value.split('\n').slice(0, maxLines).forEach((ln, i) => {
+      ctx.fillText(fitText(ctx, ln, w - 2 * ins - k(32 * U), k(G.freeFs)), x + k(G.footX), areaTop + lh * (i + 0.5));
+    });
+  }
   ctx.restore();
   return h;
 }
 
-// 文字列中の「番号」を ±delta する（No.12 → No.13、001 → 002 のように桁数維持）
+// 文字列中の「番号」を ±delta する（No.12 → No.13、B-000 → B-001 のように桁数維持）
 // 小数部（5.0 の 0 など）は対象外
 export function stepNumber(s, delta) {
   const str = s || '';
@@ -164,9 +223,9 @@ export function stepNumber(s, delta) {
   return str.slice(0, target.index) + out + str.slice(target.index + digits.length);
 }
 
-// 写真台帳・ファイル名用：黒板の文字情報だけ取り出す
+// 写真台帳・メタデータ用：黒板の文字情報
 export function boardText(board, when, dateMode) {
-  return visibleRows(board).map((f) => ({
+  return shown(board).map((f) => ({
     label: f.label,
     value: f.type === 'date' ? formatDate(when, dateMode) : f.value || '',
   }));

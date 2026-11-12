@@ -42,11 +42,9 @@ h3 { font-size: 15px; margin: 22px 0 8px; color: #9fd3b0; }
 #screen-camera { background: #000; overflow: hidden; touch-action: none; }
 #stage { position: absolute; left: env(safe-area-inset-left); right: env(safe-area-inset-right);
   top: calc(env(safe-area-inset-top) + 56px); bottom: calc(env(safe-area-inset-bottom) + 172px); }
-#video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
-#frame { position: absolute; pointer-events: none; }
-#board-canvas { position: absolute; pointer-events: auto; touch-action: none; box-shadow: 0 0 0 1px rgba(255,255,255,.35); }
-#board-handle { position: absolute; width: 34px; height: 34px; margin: -17px 0 0 -17px; pointer-events: auto; touch-action: none;
-  border-radius: 50%; background: rgba(255,255,255,.9); border: 3px solid #1f8a4c; }
+#frame { position: absolute; overflow: hidden; pointer-events: none; background: #111; }
+#video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #000; }
+#board-canvas { position: absolute; pointer-events: auto; touch-action: none; }
 #flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; transition: opacity .15s; }
 #flash.on { opacity: .7; transition: none; }
 #cam-msg { position: absolute; left: 20px; right: 20px; top: 40%; text-align: center; background: rgba(0,0,0,.75);
@@ -100,7 +98,7 @@ h3 { font-size: 15px; margin: 22px 0 8px; color: #9fd3b0; }
   display: flex; flex-direction: column; z-index: 20; box-shadow: 0 -6px 30px rgba(0,0,0,.6); }
 .sheet-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-bottom: 1px solid #333; }
 .sheet-body { overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 10px 14px calc(env(safe-area-inset-bottom) + 24px); }
-#ed-preview { display: block; width: 100%; max-width: 420px; margin: 0 auto 10px; border-radius: 4px; }
+#ed-preview { display: block; width: 100%; max-width: 320px; margin: 0 auto 10px; border-radius: 4px; }
 .ed-field { border-bottom: 1px solid #2c2c2e; padding: 10px 0; }
 .ed-field .ed-top { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 14px; color: #bbb; }
 .ed-field .ed-top .lbl { flex: 1; }
@@ -157,5 +155,5 @@ h3 { font-size: 15px; margin: 22px 0 8px; color: #9fd3b0; }
 #modal-buttons { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
 .spinner { width: 36px; height: 36px; margin: 6px auto; border: 4px solid #444; border-top-color: #2fbf6a; border-radius: 50%; animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-#toast { position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom) + 140px); transform: translateX(-50%); z-index: 60;
+#toast { position: fixed; left: 50%; top: calc(env(safe-area-inset-top) + 62px); transform: translateX(-50%); z-index: 60;
   background: rgba(30,30,30,.95); padding: 10px 16px; border-radius: 20px; font-size: 14px; max-width: 90%; text-align: center; }

@@ -1,6 +1,6 @@
 // オフライン動作用。アプリ本体のファイルだけを端末に保存し、外部とは通信しない。
 // 写真データはここを通りません（IndexedDB に暗号化保存）。
-const CACHE = 'kokuban-v1.0.0';
+const CACHE = 'kokuban-v1.1.0';
 const FILES = [
   './', 'index.html', 'styles.css', 'app.js', 'crypto.js', 'db.js', 'board.js', 'jpegmeta.js', 'zip.js',
   'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png',

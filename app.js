@@ -2,15 +2,16 @@
 import * as db from './db.js';
 import { createVault, openVault, rewrapVault, encryptBytes, decryptBytes, encryptJson, decryptJson, sha256Hex,
   sealWithPassword, openWithPassword, randomBytes } from './crypto.js';
-import { defaultBoard, renderBoard, measureBoard, stepNumber, boardText, newFieldId, formatDate } from './board.js';
+import { defaultBoard, migrateBoard, renderBoard, measureBoard, boardRect, stepNumber, boardText, newFieldId, formatDate,
+  FIELD_TYPES, MAX_ROWS, BOARD_VERSION } from './board.js';
 import { addJpegMeta } from './jpegmeta.js';
 import { ZipWriter, readZip } from './zip.js';
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const $ = (id) => document.getElementById(id);
 
 const DEFAULT_SETTINGS = {
-  size: 1600, quality: 0.92, burstMs: 1000, quickField: 'sokuten', dateMode: 'ad', sound: true,
+  size: 1600, quality: 0.92, burstMs: 1000, quickField: 'youso', dateMode: 'ad', sound: true,
   lockAfter: 60, burstOn: false, autoInc: false,
 };
 
@@ -138,9 +139,8 @@ function saveState(now = false) {
 async function loadState() {
   const box = await db.get('kv', 'state');
   const st = box ? await decryptJson(S.key, box, 'kv:state') : {};
-  S.board = st.board || defaultBoard();
-  if (!S.board.pos) S.board.pos = defaultBoard().pos;
-  S.presets = st.presets || [];
+  S.board = migrateBoard(st.board);
+  S.presets = (st.presets || []).filter((p) => p.v === BOARD_VERSION);
   S.recents = st.recents || {};
   S.settings = { ...DEFAULT_SETTINGS, ...(st.settings || {}) };
   S.activePreset = st.activePreset || null;
@@ -254,7 +254,7 @@ async function startCameraInner() {
   try {
     S.stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 4032 }, height: { ideal: 3024 } },
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 4032 }, height: { ideal: 3024 }, aspectRatio: { ideal: 4 / 3 } },
     });
   } catch (e) {
     msg.hidden = false;
@@ -284,15 +284,12 @@ function stopCamera() {
   $('video').srcObject = null;
 }
 
-function photoOrient(w, hgt) { return w >= hgt ? 'l' : 'p'; }
-
-function clampPos(pos, aspect) {
-  // aspect = 写真の高さ / 幅
-  pos.w = Math.min(1, Math.max(0.15, pos.w));
-  const hFrac = measureBoard(S.board, pos.w) / aspect;
-  pos.x = Math.min(1 - pos.w, Math.max(0, pos.x));
-  pos.y = Math.min(Math.max(0, 1 - hFrac), Math.max(0, pos.y));
-  return pos;
+// 写真は常に 4:3（横）または 3:4（縦）。映像の中央を切り出す
+function cropRect(vw, vh) {
+  const target = vw >= vh ? 4 / 3 : 3 / 4;
+  if (vw / vh > target) { const sw = vh * target; return { sx: (vw - sw) / 2, sy: 0, sw, sh: vh }; }
+  const sh = vw / target;
+  return { sx: 0, sy: (vh - sh) / 2, sw: vw, sh };
 }
 
 function layoutFrame() {
@@ -300,8 +297,9 @@ function layoutFrame() {
   const vw = v.videoWidth, vh = v.videoHeight;
   const stage = $('stage');
   const sw = stage.clientWidth, sh = stage.clientHeight;
-  // 映像が来ていない間は 4:3 で仮表示（黒板の位置を確認できるように）
-  const iw = vw || (sw > sh ? 4 : 3), ih = vh || (sw > sh ? 3 : 4);
+  // 映像の向きに合わせて 4:3 / 3:4 の枠を作る（映像が来るまでは画面の向きで仮表示）
+  const landscape = vw ? vw >= vh : sw > sh;
+  const iw = landscape ? 4 : 3, ih = landscape ? 3 : 4;
   const s = Math.min(sw / iw, sh / ih);
   const dw = iw * s, dh = ih * s;
   const f = $('frame');
@@ -309,81 +307,62 @@ function layoutFrame() {
   f.style.top = (sh - dh) / 2 + 'px';
   f.style.width = dw + 'px';
   f.style.height = dh + 'px';
-  S.frame = { w: dw, h: dh, orient: photoOrient(iw, ih) };
+  S.frame = { w: dw, h: dh, left: (sw - dw) / 2, top: (sh - dh) / 2 };
   drawOverlay();
-}
-
-function curPos() {
-  const o = S.frame?.orient || 'p';
-  if (!S.board.pos[o]) S.board.pos[o] = defaultBoard().pos[o];
-  return S.board.pos[o];
 }
 
 function drawOverlay() {
   if (!S.board || !S.frame) return;
   const { w: fw, h: fh } = S.frame;
-  const pos = clampPos(curPos(), fh / fw);
-  const bw = pos.w * fw;
-  const bh = measureBoard(S.board, bw);
+  const r = boardRect(S.board, fw, fh);
   const c = $('board-canvas');
   const dpr = Math.min(3, window.devicePixelRatio || 1);
-  c.style.left = pos.x * fw + 'px';
-  c.style.top = pos.y * fh + 'px';
-  c.style.width = bw + 'px';
-  c.style.height = bh + 'px';
-  c.width = Math.round(bw * dpr);
-  c.height = Math.round(bh * dpr);
+  c.style.left = r.x + 'px';
+  c.style.top = r.y + 'px';
+  c.style.width = r.w + 'px';
+  c.style.height = r.h + 'px';
+  c.width = Math.round(r.w * dpr);
+  c.height = Math.round(r.h * dpr);
   const ctx = c.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  renderBoard(ctx, S.board, 0, 0, bw, new Date(), S.settings.dateMode);
-  const hd = $('board-handle');
-  hd.style.left = pos.x * fw + bw + 'px';
-  hd.style.top = pos.y * fh + bh + 'px';
+  renderBoard(ctx, S.board, 0, 0, r.w, new Date(), S.settings.dateMode);
 }
 
-// 黒板のドラッグ移動・タップで編集
+// 黒板：タップで編集。位置が「自由」のときだけドラッグで移動（端に吸着）
 function setupBoardDrag() {
   const c = $('board-canvas');
   let st = null;
   c.addEventListener('pointerdown', (e) => {
     c.setPointerCapture(e.pointerId);
-    const pos = curPos();
-    st = { x: e.clientX, y: e.clientY, px: pos.x, py: pos.y, t: Date.now(), moved: false };
+    const r = boardRect(S.board, S.frame.w, S.frame.h);
+    st = { x: e.clientX, y: e.clientY, bx: r.x, by: r.y, w: r.w, h: r.h, t: Date.now(), moved: false };
   });
   c.addEventListener('pointermove', (e) => {
     if (!st) return;
     const dx = e.clientX - st.x, dy = e.clientY - st.y;
-    if (Math.abs(dx) + Math.abs(dy) > 6) st.moved = true;
-    if (!st.moved) return;
-    const pos = curPos();
-    pos.x = st.px + dx / S.frame.w;
-    pos.y = st.py + dy / S.frame.h;
+    if (Math.abs(dx) + Math.abs(dy) > 8) st.moved = true;
+    if (!st.moved || S.board.pos.anchor !== 'free') return;
+    const { w: fw, h: fh } = S.frame;
+    let nx = Math.min(Math.max(0, st.bx + dx), fw - st.w);
+    let ny = Math.min(Math.max(0, st.by + dy), fh - st.h);
+    const snap = fw * 0.03;
+    if (nx < snap) nx = 0;
+    if (fw - st.w - nx < snap) nx = fw - st.w;
+    if (ny < snap) ny = 0;
+    if (fh - st.h - ny < snap) ny = fh - st.h;
+    S.board.pos.x = nx / fw;
+    S.board.pos.y = ny / fh;
     drawOverlay();
   });
   const end = () => {
     if (!st) return;
     if (!st.moved && Date.now() - st.t < 500) openEditor();
+    else if (st.moved && S.board.pos.anchor !== 'free') toast('黒板を動かすには「黒板編集」で位置を「自由」にしてください');
     else saveState();
     st = null;
   };
   c.addEventListener('pointerup', end);
   c.addEventListener('pointercancel', () => { st = null; saveState(); });
-
-  const hd = $('board-handle');
-  let rs = null;
-  hd.addEventListener('pointerdown', (e) => {
-    hd.setPointerCapture(e.pointerId);
-    rs = { x: e.clientX, w: curPos().w };
-  });
-  hd.addEventListener('pointermove', (e) => {
-    if (!rs) return;
-    const pos = curPos();
-    pos.w = rs.w + (e.clientX - rs.x) / S.frame.w;
-    drawOverlay();
-  });
-  const rend = () => { if (rs) { rs = null; saveState(); } };
-  hd.addEventListener('pointerup', rend);
-  hd.addEventListener('pointercancel', rend);
 }
 
 // ---------- 撮影 ----------
@@ -416,17 +395,19 @@ function shoot() {
   if (!S.key || !v.videoWidth || v.readyState < 2) { toast('カメラの準備ができていません'); return; }
   const when = new Date();
   const vw = v.videoWidth, vh = v.videoHeight;
-  const maxEdge = Number(S.settings.size) || Math.max(vw, vh);
-  const sc = Math.min(1, maxEdge / Math.max(vw, vh));
-  const cw = Math.round(vw * sc), ch = Math.round(vh * sc);
+  const cr = cropRect(vw, vh); // 4:3 に切り出し
+  const srcLong = Math.max(cr.sw, cr.sh);
+  const long = Math.round(Math.min(srcLong, Number(S.settings.size) || srcLong) / 4) * 4;
+  const short = long * 3 / 4;
+  const cw = cr.sw >= cr.sh ? long : short, ch = cr.sw >= cr.sh ? short : long;
   const c = document.createElement('canvas');
   c.width = cw; c.height = ch;
   const ctx = c.getContext('2d');
-  ctx.drawImage(v, 0, 0, cw, ch);
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(v, cr.sx, cr.sy, cr.sw, cr.sh, 0, 0, cw, ch);
   const board = structuredClone(S.board);
-  const o = photoOrient(cw, ch);
-  const pos = clampPos({ ...(board.pos[o] || defaultBoard().pos[o]) }, ch / cw);
-  renderBoard(ctx, board, pos.x * cw, pos.y * ch, pos.w * cw, when, S.settings.dateMode);
+  const r = boardRect(board, cw, ch);
+  renderBoard(ctx, board, r.x, r.y, r.w, when, S.settings.dateMode);
   flash();
   shutterSound();
   rememberRecents();
@@ -451,8 +432,8 @@ function canvasToBlob(c, type, q) {
 
 function fileNameFor(rows, when, board) {
   const pick = (id) => board.fields.find((f) => f.id === id && f.show !== false)?.value || '';
-  let parts = [pick('koushu'), pick('sokuten')].filter(Boolean);
-  if (!parts.length) parts = rows.filter((r) => r.value).slice(0, 2).map((r) => r.value);
+  let parts = [pick('youso')].filter(Boolean);
+  if (!parts.length) parts = board.fields.filter((f) => f.type === 'text' && f.show !== false && f.id !== 'kouji' && f.value).slice(0, 2).map((f) => f.value);
   const d = when;
   const stamp = `${d.getFullYear()}${z2(d.getMonth() + 1)}${z2(d.getDate())}_${z2(d.getHours())}${z2(d.getMinutes())}${z2(d.getSeconds())}`;
   const tail = parts.join('_').replace(/[\\/:*?"<>|\r\n\t]+/g, '_').replace(/\s+/g, '').slice(0, 40);
@@ -531,7 +512,7 @@ function setupShutter() {
 
 // ---------- クイック変更（＋−） ----------
 function quickField() {
-  const f = S.board.fields.find((x) => x.id === S.settings.quickField && x.type !== 'date');
+  const f = S.board.fields.find((x) => x.id === S.settings.quickField && x.type === 'text');
   return f || S.board.fields.find((x) => x.type === 'text');
 }
 
@@ -582,7 +563,6 @@ function renderPresetBar() {
 
 function applyPreset(p) {
   S.board.fields = structuredClone(p.fields);
-  if (p.style) S.board.style = { ...p.style };
   S.activePreset = p.id;
   renderPresetBar();
   updateQuick();
@@ -595,12 +575,12 @@ function applyPreset(p) {
 async function savePreset() {
   const r = await modal({
     title: 'テンプレートとして保存',
-    inputs: [{ label: '名前（例: 舗装工 出来形）', value: S.board.fields.find((f) => f.id === 'koushu')?.value || '' }],
+    inputs: [{ label: '名前（例: 舗装工 出来形）', value: S.board.fields.find((f) => f.id === 'youso')?.value || '' }],
     buttons: [{ label: '保存', value: true, primary: true }, { label: 'キャンセル', value: false }],
   });
   if (!r.value) return;
   const name = (r.vals[0] || '').trim() || `テンプレート${S.presets.length + 1}`;
-  const p = { id: 't' + Date.now().toString(36), name, fields: structuredClone(S.board.fields), style: { ...S.board.style } };
+  const p = { v: BOARD_VERSION, id: 't' + Date.now().toString(36), name, fields: structuredClone(S.board.fields) };
   S.presets.push(p);
   S.activePreset = p.id;
   renderPresetBar();
@@ -636,7 +616,7 @@ function edChanged(rebuild) {
 
 function drawEdPreview() {
   const c = $('ed-preview');
-  const w = Math.min(420, $('editor').clientWidth - 28 || 340);
+  const w = Math.min(320, $('editor').clientWidth - 28 || 300);
   const hh = measureBoard(S.board, w);
   const dpr = Math.min(3, window.devicePixelRatio || 1);
   c.style.width = w + 'px'; c.style.height = hh + 'px';
@@ -651,8 +631,9 @@ function renderEditor() {
   wrap.replaceChildren();
   $('ed-mode').textContent = S.edStructure ? '内容の入力に戻る' : '項目を編集';
   $('ed-structure-tools').hidden = !S.edStructure;
-  $('ed-color').value = S.board.style?.color || 'green';
-  $('ed-opacity').value = String(S.board.style?.opacity ?? 1);
+  $('ed-pos').value = S.board.pos?.anchor || 'bl';
+  const nRows = S.board.fields.filter((f) => f.type === 'text' && f.show !== false).length;
+  $('ed-rows-note').textContent = nRows > MAX_ROWS ? `罫線の行は${MAX_ROWS}行までです（${nRows - MAX_ROWS}行は黒板に出ません）` : '';
   const fields = S.board.fields;
 
   fields.forEach((f, idx) => {
@@ -660,7 +641,7 @@ function renderEditor() {
     if (S.edStructure) {
       const lab = h('input', { type: 'text', value: f.label, placeholder: '項目名', oninput: (e) => { f.label = e.target.value; edChanged(); } });
       const typ = h('select', { onchange: (e) => { f.type = e.target.value; edChanged(true); } },
-        h('option', { value: 'text', text: '1行' }), h('option', { value: 'multiline', text: '複数行' }), h('option', { value: 'date', text: '撮影日(自動)' }));
+        FIELD_TYPES.map(([v, t]) => h('option', { value: v, text: t })));
       typ.value = f.type;
       const vis = h('input', { type: 'checkbox', checked: f.show !== false, onchange: (e) => { f.show = e.target.checked; edChanged(); } });
       box.append(
@@ -721,7 +702,7 @@ function renderEditor() {
       h('button', { class: 'btn small', text: '使う', onclick: () => applyPreset(p) }),
       h('button', { class: 'btn small', text: '上書き', onclick: async () => {
         if (!(await confirmBox('上書き保存', `「${p.name}」を今の黒板の内容で上書きしますか？`))) return;
-        p.fields = structuredClone(S.board.fields); p.style = { ...S.board.style }; S.activePreset = p.id;
+        p.fields = structuredClone(S.board.fields); S.activePreset = p.id;
         saveState(); renderPresetBar(); renderEditor(); toast('上書きしました');
       } }),
       h('button', { class: 'btn small danger', text: '削除', onclick: async () => {
@@ -740,11 +721,17 @@ function setupEditor() {
   $('ed-close').addEventListener('click', closeEditor);
   $('ed-mode').addEventListener('click', () => { S.edStructure = !S.edStructure; renderEditor(); });
   $('ed-add').addEventListener('click', () => {
-    S.board.fields.push({ id: newFieldId(), label: '新しい項目', value: '', type: 'text', show: true });
+    const fs = S.board.fields;
+    let i = fs.map((f) => f.type).lastIndexOf('text');
+    fs.splice(i + 1, 0, { id: newFieldId(), label: '新しい項目', value: '', type: 'text', show: true });
     edChanged(true);
   });
-  $('ed-color').addEventListener('change', (e) => { S.board.style.color = e.target.value; edChanged(); });
-  $('ed-opacity').addEventListener('change', (e) => { S.board.style.opacity = Number(e.target.value); edChanged(); });
+  $('ed-pos').addEventListener('change', (e) => {
+    const r = boardRect(S.board, S.frame?.w || 4, S.frame?.h || 3);
+    S.board.pos = { anchor: e.target.value, x: r.x / (S.frame?.w || 4), y: r.y / (S.frame?.h || 3) };
+    edChanged();
+    if (e.target.value === 'free') toast('カメラ画面で黒板をドラッグして動かせます');
+  });
   $('ed-save-preset').addEventListener('click', savePreset);
   $('ed-clear').addEventListener('click', async () => {
     if (!(await confirmBox('内容をクリア', '黒板の入力内容をすべて空にしますか？（項目はそのまま）'))) return;
@@ -1196,7 +1183,7 @@ async function openSettings() {
   $('st-lock').value = String(s.lockAfter);
   $('st-wipe').value = String((await getSec()).wipeAt || 0);
   const q = $('st-quick');
-  q.replaceChildren(...S.board.fields.filter((f) => f.type !== 'date').map((f) => h('option', { value: f.id, text: f.label })));
+  q.replaceChildren(...S.board.fields.filter((f) => f.type === 'text').map((f) => h('option', { value: f.id, text: f.label })));
   q.value = quickField()?.id || '';
   $('st-version').textContent = VERSION;
   show('screen-settings');
