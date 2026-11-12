@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; media-src 'self' blob: mediastream:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="工事黒板カメラ">
+<meta name="theme-color" content="#000000">
+<meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<link rel="stylesheet" href="styles.css">
+<title>工事黒板カメラ</title>
+</head>
+<body>
+
+<!-- 初回：パスコード作成 -->
+<section id="screen-setup" class="screen page" hidden>
+  <div class="center-box">
+    <h1>工事黒板カメラ</h1>
+    <p class="muted">写真と黒板の内容はこのiPhoneの中だけに暗号化して保存されます。外部のサーバーには一切送信しません。</p>
+    <p>最初に、アプリを開くためのパスコードを決めてください（6文字以上。英数字を混ぜた8文字以上を推奨）。</p>
+    <label class="field">パスコード<input id="setup-pass" type="password" autocomplete="new-password" minlength="6"></label>
+    <label class="field">もう一度<input id="setup-pass2" type="password" autocomplete="new-password" minlength="6"></label>
+    <p class="warn">パスコードを忘れると写真は二度と取り出せません（運営者も復元できない仕組みです）。</p>
+    <button id="setup-go" class="btn primary wide">はじめる</button>
+    <p id="setup-msg" class="error"></p>
+  </div>
+</section>
+
+<!-- ロック画面 -->
+<section id="screen-lock" class="screen page" hidden>
+  <div class="center-box">
+    <div class="lock-icon">🔒</div>
+    <h1>工事黒板カメラ</h1>
+    <label class="field">パスコード<input id="lock-pass" type="password" autocomplete="current-password"></label>
+    <button id="lock-go" class="btn primary wide">開く</button>
+    <p id="lock-msg" class="error"></p>
+    <button id="lock-forgot" class="btn small">パスコードを忘れた場合</button>
+  </div>
+</section>
+
+<!-- カメラ -->
+<section id="screen-camera" class="screen" hidden>
+  <div id="stage">
+    <video id="video" playsinline muted autoplay></video>
+    <div id="frame">
+      <canvas id="board-canvas"></canvas>
+      <div id="board-handle" title="大きさ変更"></div>
+    </div>
+    <div id="flash"></div>
+    <div id="cam-msg" hidden></div>
+  </div>
+
+  <div class="cam-top">
+    <button id="btn-lock" class="icon-btn" aria-label="ロック">🔒</button>
+    <div id="preset-bar" class="chips"></div>
+    <button id="btn-settings" class="icon-btn" aria-label="設定">⚙︎</button>
+  </div>
+
+  <div class="cam-quick">
+    <span id="quick-label" class="quick-label">測点</span>
+    <input id="quick-value" class="quick-input" enterkeyhint="done">
+    <button id="quick-minus" class="step-btn" aria-label="番号を減らす">−</button>
+    <button id="quick-plus" class="step-btn" aria-label="番号を増やす">＋</button>
+    <button id="btn-edit" class="btn small">黒板編集</button>
+  </div>
+
+  <div class="cam-bottom">
+    <button id="btn-gallery" class="gallery-btn" aria-label="写真一覧">
+      <img id="last-thumb" alt="">
+      <span id="photo-count" class="badge">0</span>
+    </button>
+    <button id="shutter" aria-label="撮影"><span></span></button>
+    <div class="cam-side">
+      <button id="btn-burst" class="pill" aria-pressed="false">連写 OFF</button>
+      <button id="btn-auto" class="pill" aria-pressed="false">自動+1 OFF</button>
+      <button id="btn-torch" class="pill" hidden>ライト</button>
+      <input id="zoom" type="range" min="1" max="1" step="0.1" value="1" hidden aria-label="ズーム">
+    </div>
+  </div>
+  <div id="queue-indicator" hidden>保存中 <span id="queue-n">0</span></div>
+</section>
+
+<!-- 黒板編集（下から出るシート） -->
+<div id="editor" class="sheet" hidden>
+  <div class="sheet-head">
+    <button id="ed-mode" class="btn small">項目を編集</button>
+    <strong>黒板の内容</strong>
+    <button id="ed-close" class="btn small primary">完了</button>
+  </div>
+  <div class="sheet-body">
+    <canvas id="ed-preview"></canvas>
+    <div id="ed-fields"></div>
+    <div id="ed-structure-tools" hidden>
+      <button id="ed-add" class="btn wide">＋ 項目を追加</button>
+    </div>
+    <div class="row-gap">
+      <label class="field inline">黒板の色
+        <select id="ed-color"><option value="green">緑</option><option value="black">黒</option><option value="white">白</option></select>
+      </label>
+      <label class="field inline">背景の濃さ
+        <select id="ed-opacity"><option value="1">不透明</option><option value="0.85">85%</option><option value="0.7">70%</option><option value="0.5">50%</option></select>
+      </label>
+    </div>
+    <h3>テンプレート</h3>
+    <p class="muted small-text">よく使う黒板を保存しておくと、カメラ画面上部のボタン1つで切り替えられます。</p>
+    <div class="row-gap">
+      <button id="ed-save-preset" class="btn">今の内容をテンプレート保存</button>
+      <button id="ed-clear" class="btn">内容をクリア</button>
+    </div>
+    <div id="ed-presets"></div>
+  </div>
+</div>
+
+<!-- 写真一覧 -->
+<section id="screen-gallery" class="screen page" hidden>
+  <header class="bar">
+    <button id="gal-back" class="btn small">‹ カメラ</button>
+    <strong>写真 <span id="gal-count"></span></strong>
+    <button id="gal-select" class="btn small">選択</button>
+  </header>
+  <div class="gal-filter">
+    <select id="gal-day"></select>
+    <input id="gal-search" type="search" placeholder="黒板の文字で検索（例: 舗装 No.5）">
+  </div>
+  <div id="gal-grid"></div>
+  <p id="gal-empty" class="muted center" hidden>まだ写真がありません</p>
+  <footer id="gal-actions" class="bar bottom" hidden>
+    <button id="gal-all" class="btn small">全選択</button>
+    <span id="gal-selcount">0枚</span>
+    <button id="gal-export" class="btn small primary">書き出し</button>
+    <button id="gal-delete" class="btn small danger">削除</button>
+  </footer>
+</section>
+
+<!-- 1枚表示 -->
+<section id="screen-viewer" class="screen page" hidden>
+  <header class="bar">
+    <button id="vw-back" class="btn small">‹ 一覧</button>
+    <span id="vw-pos"></span>
+    <button id="vw-share" class="btn small primary">書き出し</button>
+  </header>
+  <div class="vw-img-wrap"><img id="vw-img" alt="撮影した写真"></div>
+  <div class="vw-nav">
+    <button id="vw-prev" class="btn">‹ 前</button>
+    <button id="vw-delete" class="btn danger">削除</button>
+    <button id="vw-next" class="btn">次 ›</button>
+  </div>
+  <div id="vw-info" class="info"></div>
+</section>
+
+<!-- 設定 -->
+<section id="screen-settings" class="screen page" hidden>
+  <header class="bar">
+    <button id="st-back" class="btn small">‹ 戻る</button>
+    <strong>設定</strong>
+    <span></span>
+  </header>
+  <div class="settings">
+    <h3>撮影</h3>
+    <label class="field">保存する画像の大きさ（長辺）
+      <select id="st-size">
+        <option value="1280">1280px（約100万画素・軽い）</option>
+        <option value="1600">1600px（約190万画素）</option>
+        <option value="2048">2048px（約310万画素）</option>
+        <option value="0">カメラの最大</option>
+      </select>
+    </label>
+    <label class="field">画質
+      <select id="st-quality"><option value="0.85">標準</option><option value="0.92">高</option><option value="0.97">最高</option></select>
+    </label>
+    <label class="field">連写の間隔（シャッター長押し中）
+      <select id="st-burst"><option value="500">0.5秒</option><option value="1000">1秒</option><option value="2000">2秒</option><option value="3000">3秒</option></select>
+    </label>
+    <label class="field">＋−ボタンで変える項目
+      <select id="st-quick"></select>
+    </label>
+    <label class="field">撮影日の表記
+      <select id="st-date"><option value="ad">西暦（2026/11/12）</option><option value="reiwa">和暦（令和8年11月12日）</option></select>
+    </label>
+    <label class="check"><input id="st-sound" type="checkbox"> シャッター音を鳴らす</label>
+
+    <h3>セキュリティ</h3>
+    <label class="field">自動ロック
+      <select id="st-lock">
+        <option value="0">アプリを離れたら即ロック</option>
+        <option value="60">操作しないで1分</option>
+        <option value="300">操作しないで5分</option>
+        <option value="900">操作しないで15分</option>
+      </select>
+    </label>
+    <label class="field">パスコードを続けて間違えたら
+      <select id="st-wipe"><option value="0">消去しない（待ち時間が延びる）</option><option value="10">10回で全データ消去</option><option value="20">20回で全データ消去</option></select>
+    </label>
+    <button id="st-change-pass" class="btn wide">パスコードを変更</button>
+
+    <h3>データ</h3>
+    <p id="st-storage" class="muted"></p>
+    <button id="st-verify" class="btn wide">改ざんチェック（書き出した写真を照合）</button>
+    <button id="st-backup-all" class="btn wide">全写真を暗号化バックアップ</button>
+    <label class="btn wide file-btn">暗号化バックアップから復元<input id="st-restore" type="file" accept=".kbk,application/octet-stream"></label>
+    <button id="st-wipe-now" class="btn wide danger">すべてのデータを消去</button>
+    <p class="muted small-text">バージョン <span id="st-version"></span>　通信: なし（完全オフライン）</p>
+  </div>
+</section>
+
+<!-- 改ざんチェック -->
+<section id="screen-verify" class="screen page" hidden>
+  <header class="bar">
+    <button id="vf-back" class="btn small">‹ 設定</button>
+    <strong>改ざんチェック</strong>
+    <span></span>
+  </header>
+  <div class="settings">
+    <p>書き出したJPEGを選ぶと、撮影時に記録した指紋（SHA-256）と照合します。1ビットでも変わっていれば「不一致」になります。</p>
+    <label class="btn wide primary file-btn">写真を選ぶ<input id="vf-files" type="file" accept="image/jpeg" multiple></label>
+    <div id="vf-result"></div>
+  </div>
+</section>
+
+<!-- 汎用ダイアログ -->
+<div id="modal" class="modal" hidden>
+  <div class="modal-box">
+    <h2 id="modal-title"></h2>
+    <div id="modal-body"></div>
+    <div id="modal-buttons"></div>
+  </div>
+</div>
+<div id="busy" class="modal" hidden><div class="modal-box center"><div class="spinner"></div><p id="busy-text">処理中…</p></div></div>
+<div id="toast" hidden></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
