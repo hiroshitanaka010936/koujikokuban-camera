@@ -82,6 +82,10 @@ h3 { font-size: 15px; margin: 22px 0 8px; color: #9fd3b0; }
 .pill[aria-pressed="true"] { background: #1f8a4c; border-color: #1f8a4c; }
 #zoom { width: 100%; }
 #queue-indicator { position: absolute; top: calc(env(safe-area-inset-top) + 58px); right: 10px; background: rgba(0,0,0,.7); padding: 4px 10px; border-radius: 10px; font-size: 13px; }
+#shutter[aria-busy="true"] { opacity: .55; }
+@media (orientation: landscape) and (max-height: 520px) {
+  #queue-indicator { right: calc(env(safe-area-inset-right) + 140px); }
+}
 
 /* 横向き：操作部を右側へ */
 @media (orientation: landscape) and (max-height: 520px) {

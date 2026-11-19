@@ -7,7 +7,7 @@ import { defaultBoard, migrateBoard, renderBoard, measureBoard, boardRect, stepN
 import { addJpegMeta } from './jpegmeta.js';
 import { ZipWriter, readZip } from './zip.js';
 
-const VERSION = '1.1.0';
+const VERSION = '2.0.0';
 const $ = (id) => document.getElementById(id);
 
 const DEFAULT_SETTINGS = {
@@ -25,13 +25,14 @@ const S = {
   photos: [], // { id, createdAt, meta }（新しい順）
   photosLoaded: false,
   stream: null, track: null,
-  queue: Promise.resolve(), pending: 0,
+  staging: null, finishing: null, drafts: new Set(), draftError: false, locking: false,
   urls: new Set(),
   lastActive: Date.now(), hiddenAt: 0,
   galSelect: false, selected: new Set(), galList: [], viewIndex: 0,
   edStructure: false,
   frame: null,
 };
+let accessGranted = () => false;
 
 // ---------- 小物 ----------
 function h(tag, props = {}, ...kids) {
@@ -49,7 +50,7 @@ function h(tag, props = {}, ...kids) {
 }
 
 function show(id) {
-  for (const s of document.querySelectorAll('.screen')) s.hidden = s.id !== id;
+  for (const s of document.querySelectorAll('#workspace .screen')) s.hidden = s.id !== id;
   if (S.track) S.track.enabled = id === 'screen-camera';
   if (id === 'screen-camera') {
     requestAnimationFrame(layoutFrame);
@@ -150,14 +151,14 @@ async function loadState() {
 async function getSec() { return (await db.get('meta', 'sec')) || { fails: 0, until: 0, wipeAt: 0 }; }
 
 async function doSetup() {
+  if (!accessGranted() || S.locking) return;
   const p1 = $('setup-pass').value, p2 = $('setup-pass2').value;
   if (p1.length < 6) return ($('setup-msg').textContent = '6文字以上にしてください');
   if (p1 !== p2) return ($('setup-msg').textContent = '2回の入力が一致しません');
   busy('暗号鍵を作成中…');
   try {
     const { vault, key } = await createVault(p1);
-    await db.put('meta', vault, 'vault');
-    await db.put('meta', { fails: 0, until: 0, wipeAt: 0 }, 'sec');
+    await db.createPhotoVault(vault);
     S.key = key;
     $('setup-pass').value = $('setup-pass2').value = '';
     await loadState();
@@ -165,11 +166,17 @@ async function doSetup() {
     try { await navigator.storage?.persist?.(); } catch {}
     await afterUnlock();
   } catch (e) {
+    if (e.name === 'ConstraintError') {
+      show('screen-lock');
+      $('lock-msg').textContent = '写真庫は設定済みです。写真用パスコードを入力してください。';
+      return;
+    }
     $('setup-msg').textContent = '作成に失敗しました: ' + e.message;
   } finally { busy(); }
 }
 
 async function doUnlock() {
+  if (!accessGranted() || S.locking) return;
   const pass = $('lock-pass').value;
   const msg = $('lock-msg');
   const sec = await getSec();
@@ -206,22 +213,30 @@ async function doUnlock() {
 }
 
 async function afterUnlock() {
+  if (!accessGranted()) { await lock(); return; }
+  const ids = await db.draftIds();
+  for (const id of ids) S.drafts.add(id);
+  S.draftError = false;
   S.lastActive = Date.now();
   applySettingsToUi();
   renderPresetBar();
   updateQuick();
   show('screen-camera');
   loadPhotos().catch((e) => console.error(e));
+  updateQueue();
+  finishDrafts();
 }
 
 async function lock() {
-  if (!S.key) return;
+  if (!S.key || S.locking) return;
+  S.locking = true;
+  $('lock-go').disabled = true;
   show('screen-lock');
   $('editor').hidden = true;
   $('modal').hidden = true;
   stopBurst();
   stopCamera();
-  try { await S.queue; } catch {}
+  await Promise.allSettled([S.staging, S.finishing]);
   await saveState(true).catch(() => {});
   S.key = null;
   S.photos = []; S.photosLoaded = false; S.board = null; S.presets = []; S.recents = {};
@@ -234,6 +249,8 @@ async function lock() {
   $('last-thumb').removeAttribute('src');
   $('ed-fields').replaceChildren();
   $('vf-result').replaceChildren();
+  S.drafts.clear(); S.draftError = false; S.locking = false;
+  $('lock-go').disabled = false;
 }
 
 // ---------- カメラ ----------
@@ -252,16 +269,17 @@ async function startCameraInner() {
     return;
   }
   try {
+    const longEdge = Number(S.settings.size) || 4032;
     S.stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 4032 }, height: { ideal: 3024 }, aspectRatio: { ideal: 4 / 3 } },
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: longEdge }, height: { ideal: Math.round(longEdge * 3 / 4) }, aspectRatio: { ideal: 4 / 3 }, frameRate: { ideal: 20, max: 30 } },
     });
   } catch (e) {
     msg.hidden = false;
     msg.textContent = 'カメラを起動できません。「設定」アプリ → Safari → カメラ を「許可」にするか、表示された確認で「許可」を押してください。（' + e.name + '）';
     return;
   }
-  if (!S.key) { stopCamera(); return; }
+  if (!S.key || S.locking || !accessGranted() || document.hidden || $('screen-camera').hidden) { stopCamera(); return; }
   msg.hidden = true;
   const v = $('video');
   v.srcObject = S.stream;
@@ -391,6 +409,16 @@ function flash() {
 }
 
 function shoot() {
+  if (!accessGranted() || S.locking || $('screen-camera').hidden) return;
+  if (S.staging) { toast('直前の1枚を端末に記録しています'); return; }
+  if (S.draftError) { toast('ロックを開き直すと記録済みの写真の仕上げを再試行します'); return; }
+  try { captureFrame(); } catch (e) {
+    stopBurst();
+    alertBox('この写真は記録できませんでした', String(e.message || e));
+  }
+}
+
+function captureFrame() {
   const v = $('video');
   if (!S.key || !v.videoWidth || v.readyState < 2) { toast('カメラの準備ができていません'); return; }
   const when = new Date();
@@ -402,28 +430,43 @@ function shoot() {
   const cw = cr.sw >= cr.sh ? long : short, ch = cr.sw >= cr.sh ? short : long;
   const c = document.createElement('canvas');
   c.width = cw; c.height = ch;
-  const ctx = c.getContext('2d');
+  const ctx = c.getContext('2d', {willReadFrequently:true});
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(v, cr.sx, cr.sy, cr.sw, cr.sh, 0, 0, cw, ch);
   const board = structuredClone(S.board);
-  const r = boardRect(board, cw, ch);
-  renderBoard(ctx, board, r.x, r.y, r.w, when, S.settings.dateMode);
+  const id = newId();
+  const snap = {board, createdAt:when.getTime(), w:cw, h:ch, quality:S.settings.quality, dateMode:S.settings.dateMode};
+  const pixels = ctx.getImageData(0, 0, cw, ch).data;
+  c.width = c.height = 0;
   flash();
   shutterSound();
   rememberRecents();
-  S.pending++;
+  const key = S.key;
+  S.staging = (async () => {
+    const [image, info] = await Promise.all([
+      encryptBytes(key, pixels, id + ':draft-image'), encryptJson(key, snap, id + ':draft-info'),
+    ]);
+    await db.putDraft({id, image, info});
+    S.drafts.add(id);
+    if (S.settings.autoInc) quickStep(1, true);
+  })().catch(e => {
+    stopBurst();
+    alertBox('この写真は記録できませんでした', e.name === 'QuotaExceededError' ? '端末の空き容量を確認してください。' : String(e.message || e));
+  }).finally(() => {
+    S.staging = null;
+    updateQueue();
+    finishDrafts();
+  });
   updateQueue();
-  const job = () => processCapture(c, board, when).catch((e) => {
-    console.error(e);
-    alertBox('保存できませんでした', (e && e.name === 'QuotaExceededError') ? 'iPhoneの空き容量が不足しています。写真を書き出して削除してください。' : String(e?.message || e));
-  }).finally(() => { S.pending--; updateQueue(); });
-  S.queue = S.queue.then(job, job);
-  if (S.settings.autoInc) quickStep(1, true);
 }
 
 function updateQueue() {
-  $('queue-indicator').hidden = S.pending <= 0;
-  $('queue-n').textContent = S.pending;
+  const notices = [];
+  if (S.staging) notices.push('端末に記録中…');
+  if (S.drafts.size) notices.push(`記録済み ${S.drafts.size}枚・${S.draftError ? '仕上げ待ち' : '仕上げ中'}`);
+  $('queue-indicator').textContent = notices.join(' ／ ');
+  $('queue-indicator').hidden = !notices.length;
+  $('shutter').setAttribute('aria-busy', String(!!S.staging));
 }
 
 function canvasToBlob(c, type, q) {
@@ -450,27 +493,54 @@ async function makeThumb(source, sw, sh) {
   return new Uint8Array(await b.arrayBuffer());
 }
 
-async function storePhoto(id, when, bytes, thumb, meta) {
+async function storePhoto(id, when, bytes, thumb, meta, fromDraft = false) {
   if (!S.key) throw new Error('ロック中のため保存できません');
   const [m, t, i] = await Promise.all([
     encryptJson(S.key, meta, `${id}:meta`),
     encryptBytes(S.key, thumb, `${id}:thumb`),
     encryptBytes(S.key, bytes, `${id}:image`),
   ]);
-  await db.putPhoto({ id, createdAt: when, meta: m }, { id, data: t }, { id, data: i });
+  return db.putPhoto({ id, createdAt: when, meta: m }, { id, data: t }, { id, data: i }, fromDraft);
 }
 
-async function processCapture(c, board, when) {
-  const blob = await canvasToBlob(c, 'image/jpeg', Number(S.settings.quality));
+function finishDrafts() {
+  if (S.finishing || S.locking || S.draftError || !S.key || !S.drafts.size || !accessGranted()) return;
+  S.finishing = (async () => {
+    while (S.drafts.size && !S.locking && accessGranted()) {
+      const id = S.drafts.values().next().value;
+      const draft = await db.get('drafts', id);
+      if (draft) await processCapture(draft);
+      S.drafts.delete(id);
+      updateQueue();
+    }
+  })().catch(e => {
+    S.draftError = true;
+    stopBurst();
+    updateQueue();
+    alertBox('写真は端末に記録済みです', '仕上げを完了できませんでした。空き容量を確認し、ロックを開き直してください。' + (e.message || ''));
+  }).finally(() => { S.finishing = null; finishDrafts(); });
+}
+
+async function processCapture({id, image, info}) {
+  const [snap, pixels] = await Promise.all([
+    decryptJson(S.key, info, id + ':draft-info'), decryptBytes(S.key, image, id + ':draft-image'),
+  ]);
+  const {board, w, h, createdAt, dateMode, quality} = snap;
+  const when = new Date(createdAt);
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  ctx.putImageData(new ImageData(new Uint8ClampedArray(pixels.buffer), w, h), 0, 0);
+  const r = boardRect(board, w, h);
+  renderBoard(ctx, board, r.x, r.y, r.w, when, dateMode);
+  const blob = await canvasToBlob(c, 'image/jpeg', Number(quality));
   const thumb = await makeThumb(c, c.width, c.height);
-  const rows = boardText(board, when, S.settings.dateMode);
+  const rows = boardText(board, when, dateMode);
   const bytes = addJpegMeta(new Uint8Array(await blob.arrayBuffer()), { when, width: c.width, height: c.height, rows });
   const hash = await sha256Hex(bytes);
-  const id = newId();
   const meta = { id, createdAt: when.getTime(), w: c.width, h: c.height, rows, hash, size: bytes.length, name: fileNameFor(rows, when, board) };
   c.width = c.height = 0;
-  await storePhoto(id, when.getTime(), bytes, thumb, meta);
-  S.photos.unshift({ id, createdAt: meta.createdAt, meta });
+  if (!await storePhoto(id, when.getTime(), bytes, thumb, meta, true)) return;
+  if (!S.photos.some(p => p.id === id)) S.photos.unshift({ id, createdAt: meta.createdAt, meta });
   $('photo-count').textContent = S.photos.length;
   setLastThumb(thumb);
 }
@@ -1202,6 +1272,7 @@ function setupSettings() {
   $('st-back').addEventListener('click', () => { applySettingsToUi(); updateQuick(); drawOverlay(); show('screen-camera'); });
   const bind = (id, key, conv = (v) => v) => $(id).addEventListener('change', (e) => {
     S.settings[key] = conv(e.target.type === 'checkbox' ? e.target.checked : e.target.value);
+    if (key === 'size') stopCamera();
     saveState();
   });
   bind('st-size', 'size', Number);
@@ -1219,6 +1290,12 @@ function setupSettings() {
   $('vf-back').addEventListener('click', () => show('screen-settings'));
   $('vf-files').addEventListener('change', (e) => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) verifyFiles(fs); });
   $('st-backup-all').addEventListener('click', async () => {
+    if (S.staging || S.finishing) {
+      busy('記録した写真の仕上げを待っています…');
+      try { await S.staging; await S.finishing; } finally { busy(); }
+    }
+    if (!S.key || !accessGranted()) return;
+    if (S.drafts.size) return alertBox('まだバックアップできません', '記録済みの写真を仕上げてから再試行してください。');
     if (!S.photosLoaded) await loadPhotos();
     if (!S.photos.length) return toast('写真がありません');
     exportBackup(orderedIds(S.photos.map((p) => p.id)));
@@ -1328,8 +1405,9 @@ function setupCameraUi() {
 }
 
 // ---------- 起動 ----------
-async function init() {
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+export async function startApp(uid, allowed) {
+  accessGranted = allowed;
+  await db.selectVault(uid);
   if (!window.crypto?.subtle || !window.indexedDB) {
     document.body.textContent = 'このブラウザには対応していません。iPhoneのSafari（https のページ）で開いてください。';
     return;
@@ -1358,7 +1436,11 @@ async function init() {
   show(vault ? 'screen-lock' : 'screen-setup');
 }
 
-init();
+export async function suspendCamera() {
+  stopBurst();
+  stopCamera();
+  await S.staging;
+}
 
 // テスト用フック：手元のPCでの動作確認時だけ有効（本番の https サイトでは無効）
 if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') window.__kb = { S, shoot, lock, verifyFiles };
